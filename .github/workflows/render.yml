@@ -1,0 +1,87 @@
+# Rendery Blendera na wielu maszynach naraz. W tym repo nie ma żadnych naszych plików: skrypty pobierane są w trakcie z repo prywatnego
+# (sekret PRYWATNE_REPO_TOKEN), a obrazki od razu wracają do repo prywatnego (gałąź render-wyniki). Uruchamianie tylko ręczne.
+name: render
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'gałąź repo prywatnego ze skryptami i zadaniem'
+        required: true
+      zadanie:
+        description: 'ścieżka pliku zadania JSON w repo prywatnym'
+        required: true
+      maszyny:
+        description: 'liczba maszyn (1–20)'
+        required: true
+        default: '4'
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      shardy: ${{ steps.p.outputs.shardy }}
+    steps:
+      - id: p
+        run: |
+          n=${{ inputs.maszyny }}; [ "$n" -ge 1 ] && [ "$n" -le 20 ] || n=4
+          echo "shardy=$(python3 -c "import json;print(json.dumps(list(range($n))))")" >> $GITHUB_OUTPUT
+  render:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shardy) }}
+    steps:
+      - name: Skrypty z repo prywatnego
+        uses: actions/checkout@v4
+        with:
+          repository: Croezus89/Argos-Studios
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          path: prywatne
+          filter: blob:none
+          sparse-checkout: |
+            gry/gra8/seed/blender
+            render/zadania
+          persist-credentials: false
+      - name: Blender 5.2.4 (z pamięci podręcznej)
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-5.2.4-linux-x64
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: mkdir -p ~/blender && curl -sSL https://download.blender.org/release/Blender5.2/blender-5.2.4-linux-x64.tar.xz | tar -xJ -C ~/blender
+      - name: Render (bez wypisywania treści)
+        run: |
+          sudo apt-get install -y -q libxi6 libxkbcommon0 libxxf86vm1 libgl1 libegl1 >/dev/null 2>&1 || true
+          cd prywatne
+          python3 - "${{ inputs.zadanie }}" "${{ matrix.shard }}" "${{ inputs.maszyny }}" > ../polecenia.txt <<'PY'
+          import json, sys
+          z = json.load(open(sys.argv[1])); s, n = int(sys.argv[2]), int(sys.argv[3])
+          for i, w in enumerate(z["warianty"]):
+              if i % n == s:
+                  print(json.dumps([z["skrypt"], f"../wynik/{i:03d}", *z.get("args", []), *(["--wariant", w] if w else [])]))
+          PY
+          mkdir -p ../wynik; ok=0; zle=0
+          while read -r l; do
+            skr=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])[0])" "$l"); out=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])[1])" "$l")
+            mapfile -t reszta < <(python3 -c "import json,sys;[print(x) for x in json.loads(sys.argv[1])[2:]]" "$l")
+            mkdir -p "$out"
+            if ~/blender/blender-5.2.4-linux-x64/blender -b -t 0 -P "$skr" -- --out "$out" "${reszta[@]}" > /dev/null 2>&1; then ok=$((ok+1)); else zle=$((zle+1)); fi
+          done < ../polecenia.txt
+          echo "warianty: ok $ok, błąd $zle; rdzeni: $(nproc)"
+      - name: Obrazki do repo prywatnego (gałąź render-wyniki)
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          git config --global user.name render; git config --global user.email render@users.noreply.github.com
+          mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
+          if git fetch -q --depth 1 o render-wyniki 2>/dev/null; then git checkout -q -b render-wyniki FETCH_HEAD; else git checkout -q --orphan render-wyniki; fi
+          mkdir -p "wyniki/${{ github.run_id }}/${{ matrix.shard }}" && cp -r ../wynik/. "wyniki/${{ github.run_id }}/${{ matrix.shard }}/"
+          git add -A && git commit -q -m "render ${{ github.run_id }} shard ${{ matrix.shard }}" || exit 0
+          for i in 1 2 3 4 5 6; do git push -q o HEAD:render-wyniki 2>/dev/null && { echo "wysłane"; exit 0; }; sleep $((i*3)); git fetch -q --depth 20 o render-wyniki && git rebase -q FETCH_HEAD || true; done
+          echo "nie wysłano"; exit 1
