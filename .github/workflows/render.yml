@@ -8,8 +8,13 @@ on:
         description: 'gałąź repo prywatnego ze skryptami i zadaniem'
         required: true
       zadanie:
-        description: 'ścieżka pliku zadania JSON w repo prywatnym'
-        required: true
+        description: 'ścieżka pliku zadania JSON w repo prywatnym (albo puste, gdy podane „warianty”)'
+        required: false
+        default: ''
+      warianty:
+        description: 'zadanie wprost: JSON {"skrypt", "args", "warianty", opcjonalnie "katalogi"} albo jego base64 (także gzip); zastępuje plik zadania; nie trafia do logu'
+        required: false
+        default: ''
       maszyny:
         description: 'liczba maszyn (1–20)'
         required: true
@@ -35,6 +40,35 @@ jobs:
       matrix:
         shard: ${{ fromJSON(needs.plan.outputs.shardy) }}
     steps:
+      - name: Zadanie (z wejścia „warianty” albo z pliku; w logu tylko liczby)
+        id: z
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, json, os, re, sys
+          wej = json.load(open(os.environ['GITHUB_EVENT_PATH'])).get('inputs') or {}
+          sciezka = re.compile(r'^[A-Za-z0-9_./-]+$')
+          ok = lambda p: isinstance(p, str) and sciezka.match(p) and '..' not in p and not p.startswith('/')
+          def blad(m): print('BŁĄD zadania: ' + m); sys.exit(1)
+          def wypisz(klucz, linie):
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f: f.write(f'{klucz}<<KONIEC\n' + ''.join(l + '\n' for l in linie) + 'KONIEC\n')
+          w, zad = (wej.get('warianty') or '').strip(), (wej.get('zadanie') or '').strip()
+          if w:
+              try:
+                  if not w.startswith('{'):
+                      b = base64.b64decode(w, validate=False); w = (gzip.decompress(b) if b[:2] == b'\x1f\x8b' else b).decode('utf-8')
+                  z = json.loads(w)
+                  assert isinstance(z, dict)
+              except Exception as e: blad('wejście „warianty” to nie JSON ani base64 JSON (' + type(e).__name__ + ')')
+              if not ok(z.get('skrypt')) or not z['skrypt'].endswith('.py'): blad('zła ścieżka „skrypt”')
+              if not isinstance(z.get('warianty'), list) or not z['warianty'] or not all(isinstance(x, str) for x in z['warianty']): blad('„warianty” to nie lista napisów')
+              if not all(isinstance(x, str) for x in z.get('args', [])): blad('„args” to nie lista napisów')
+              kat = z.get('katalogi') or [os.path.dirname(os.path.dirname(z['skrypt']))]
+              if not all(ok(k) for k in kat): blad('zła ścieżka w „katalogi”')
+              json.dump(z, open(os.path.expanduser('~/zadanie.json'), 'w')); wypisz('wzorce', kat); print(f'zadanie z wejścia: wariantów {len(z["warianty"])}')
+          else:
+              if not ok(zad) or not zad.endswith('.json'): blad('brak wejścia „warianty” i złe/puste „zadanie”')
+              wypisz('wzorce', [os.path.dirname(zad)]); print('zadanie z pliku')
+          PY
       - name: Skrypty z repo prywatnego
         uses: actions/checkout@v4
         with:
@@ -43,10 +77,24 @@ jobs:
           token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
           path: prywatne
           filter: blob:none
-          sparse-checkout: |
-            gry/gra8/seed/blender
-            render/zadania
+          sparse-checkout: ${{ steps.z.outputs.wzorce }}
           persist-credentials: false
+      - name: Katalogi skryptu (zadanie z pliku)
+        if: inputs.warianty == ''
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          ZADANIE: ${{ inputs.zadanie }}
+        run: |
+          cp "prywatne/$ZADANIE" ~/zadanie.json
+          mapfile -t K < <(python3 -c "
+          import json, os, re, sys
+          z = json.load(open(os.path.expanduser('~/zadanie.json'))); kat = z.get('katalogi') or [os.path.dirname(os.path.dirname(z['skrypt']))]
+          for k in kat:
+              if not re.match(r'^[A-Za-z0-9_./-]+$', k) or '..' in k: sys.exit('zła ścieżka')
+              print(k)")
+          H="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$T" | base64 -w0)"
+          git -C prywatne -c "http.https://github.com/.extraheader=$H" sparse-checkout add "${K[@]}" > /dev/null 2>&1 || { echo "sparse-checkout add: błąd"; exit 1; }
+          echo "wariantów: $(python3 -c "import json,os;print(len(json.load(open(os.path.expanduser('~/zadanie.json')))['warianty']))"), katalogów skryptu: ${#K[@]}"
       - name: Blender 5.2.4 (z pamięci podręcznej)
         id: cache
         uses: actions/cache@v4
@@ -59,7 +107,7 @@ jobs:
         run: |
           sudo apt-get install -y -q libxi6 libxkbcommon0 libxxf86vm1 libgl1 libegl1 >/dev/null 2>&1 || true
           cd prywatne
-          python3 - "${{ inputs.zadanie }}" "${{ matrix.shard }}" "${{ inputs.maszyny }}" > ../polecenia.txt <<'PY'
+          python3 - ~/zadanie.json "${{ matrix.shard }}" "${{ inputs.maszyny }}" > ../polecenia.txt <<'PY'
           import json, sys
           z = json.load(open(sys.argv[1])); s, n = int(sys.argv[2]), int(sys.argv[3])
           for i, w in enumerate(z["warianty"]):
