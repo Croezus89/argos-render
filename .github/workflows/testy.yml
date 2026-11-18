@@ -1,0 +1,125 @@
+# Testy logiki gry na wielu maszynach naraz. W tym repo nie ma naszych plików: kod gry i skrypt uruchamiający pobierane są w trakcie z repo
+# prywatnego (sekret PRYWATNE_REPO_TOKEN), a pełne logi testów od razu wracają do repo prywatnego (gałąź testy-wyniki, wyniki/<run_id>/).
+# W logu tego przebiegu: tylko nazwy testów, OK/BŁĄD i sekundy. Uruchamianie tylko ręczne. Testy czasu (płynność) zostają poza Actions.
+name: testy
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'gałąź albo commit repo prywatnego'
+        required: true
+      gra:
+        description: 'katalog gry w repo prywatnym (z testy/komplet.sh)'
+        required: true
+      testy:
+        description: '"logika" (bez testów czasu), "wszystkie" albo nazwy po przecinku; "@kontrola" = kontrola ujemna (MUSI dać BŁĄD)'
+        required: true
+        default: 'logika'
+      maszyny:
+        description: 'liczba maszyn (1–20)'
+        required: true
+        default: '4'
+permissions:
+  contents: read
+env:
+  GRA: ${{ inputs.gra }}
+  WYB: ${{ inputs.testy }}
+  N: ${{ inputs.maszyny }}
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      shardy: ${{ steps.p.outputs.shardy }}
+    steps:
+      - id: p
+        run: |
+          [[ "$GRA" =~ ^[A-Za-z0-9_./-]+$ && "$GRA" != *..* && "$WYB" =~ ^[A-Za-z0-9_,@\ -]+$ ]] || { echo "złe wejście gra/testy"; exit 1; }
+          [[ "$N" =~ ^[0-9]+$ && "$N" -ge 1 && "$N" -le 20 ]] || { echo "maszyny: 1–20"; exit 1; }
+          echo "shardy=$(python3 -c "import json;print(json.dumps(list(range($N))))")" >> $GITHUB_OUTPUT
+  testy:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shardy) }}
+    env:
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Kod z repo prywatnego
+        uses: actions/checkout@v5
+        with:
+          repository: Croezus89/Argos-Studios
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          path: prywatne
+          filter: blob:none
+          sparse-checkout: |
+            ${{ inputs.gra }}
+            studio/wspolne
+            studio/narzedzia
+            archiwum/dostepnosc-narzedzia/skaner
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Lista testów tej maszyny
+        id: l
+        run: |
+          bash prywatne/studio/narzedzia/actions-testy.sh --lista "$GRA" "$WYB" "$SHARD" "$N" > ~/lista.txt
+          echo "testów: $(wc -l < ~/lista.txt)"
+          grep -q webkit ~/lista.txt && echo "webkit=1" >> $GITHUB_OUTPUT || true
+      - name: Przeglądarki (playwright-core z package-lock, Chromium, WebKit gdy potrzebny)
+        run: |
+          s=$(date +%s); P=$HOME/pw; mkdir -p $P; echo "PLAYWRIGHT_BROWSERS_PATH=$P" >> $GITHUB_ENV; export PLAYWRIGHT_BROWSERS_PATH=$P
+          cd prywatne/archiwum/dostepnosc-narzedzia/skaner && npm ci --no-audit --no-fund --silent > /dev/null 2>&1 || { echo "npm ci: błąd"; exit 1; }
+          CLI=node_modules/playwright-core/cli.js; B="chromium"; [ "${{ steps.l.outputs.webkit }}" = 1 ] && B="chromium webkit"
+          node $CLI install $B > /dev/null 2>&1 || { echo "instalacja przeglądarek: błąd"; exit 1; }
+          sudo env "PATH=$PATH" "PLAYWRIGHT_BROWSERS_PATH=$P" node $CLI install-deps $B > /dev/null 2>&1 || { echo "zależności przeglądarek: błąd"; exit 1; }
+          ln -sfn "$(ls -d $P/chromium-*/chrome-linux64/chrome | head -1)" $P/chromium && sudo ln -sfn $P /opt/pw-browsers
+          python3 -m pip install --user --break-system-packages -q numpy pillow > /dev/null 2>&1 || echo "numpy/pillow: błąd instalacji"
+          echo "playwright-core $(node -p "require('./node_modules/playwright-core/package.json').version"), $(/opt/pw-browsers/chromium --version), przeglądarki: $B, $(( $(date +%s) - s )) s"
+      - name: Testy (w logu tylko nazwy i OK/BŁĄD)
+        id: t
+        run: |
+          set +e; s=$(date +%s); mkdir -p "$HOME/wynik"
+          bash prywatne/studio/narzedzia/actions-testy.sh "$GRA" "$WYB" "$SHARD" "$N" "$HOME/wynik"; k=$?
+          echo "kod=$k" >> $GITHUB_OUTPUT
+          { echo "ref $(git -C prywatne rev-parse HEAD)"; echo "maszyna $SHARD/$N, rdzeni $(nproc), $(. /etc/os-release; echo $PRETTY_NAME)"; echo "testy $(( $(date +%s) - s )) s, kod $k"; } > "$HOME/wynik/info.txt"
+          echo "rdzeni $(nproc)"
+      - name: Logi do repo prywatnego (gałąź testy-wyniki)
+        if: always()
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          git config --global user.name testy; git config --global user.email testy@users.noreply.github.com
+          mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
+          if git fetch -q --depth 1 o testy-wyniki 2>/dev/null; then git checkout -q -b testy-wyniki FETCH_HEAD; else git checkout -q --orphan testy-wyniki; fi
+          D="wyniki/${{ github.run_id }}/$SHARD"; mkdir -p "$D"
+          find "$HOME/wynik" -maxdepth 1 -type f \( -name '*.log' -o -name '*.wynik' -o -name '*.txt' \) -exec cp {} "$D/" \; 2>/dev/null
+          git add -A && git commit -q -m "testy ${{ github.run_id }} maszyna $SHARD" || exit 0
+          for i in $(seq 1 10); do git push -q o HEAD:testy-wyniki 2>/dev/null && { echo "wysłane"; exit 0; }; sleep $(( i * 2 + RANDOM % 5 )); git fetch -q --depth 30 o testy-wyniki && git rebase -q FETCH_HEAD > /dev/null 2>&1 || true; done
+          echo "nie wysłano"; exit 1
+      - name: Wynik maszyny
+        if: steps.t.outputs.kod != '0'
+        run: exit 1
+  razem:
+    needs: [plan, testy]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Podsumowanie wszystkich maszyn (tylko nazwy i OK/BŁĄD)
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          set +e +o pipefail
+          git config --global user.name testy; git config --global user.email testy@users.noreply.github.com
+          mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
+          git fetch -q --depth 1 o testy-wyniki && git checkout -q -b testy-wyniki FETCH_HEAD || { echo "brak gałęzi testy-wyniki"; exit 1; }
+          D="wyniki/${{ github.run_id }}"; m=$(ls -d "$D"/*/ 2>/dev/null | wc -l)
+          cat "$D"/*/publiczne.txt 2>/dev/null | grep -E '^(OK|BŁĄD|POMINIĘTY|BUILD)' | sort -k2 > ../razem.txt
+          ok=$(grep -c '^OK' ../razem.txt); zle=$(grep -cvE '^OK' ../razem.txt)
+          { echo "Przebieg ${{ github.run_id }}: OK $ok/$((ok+zle)), maszyn z wynikiem $m/$N"; cat ../razem.txt; } | tee "$D/RAZEM.txt"
+          git add -A && git commit -q -m "testy ${{ github.run_id }} razem" && for i in $(seq 1 6); do git push -q o HEAD:testy-wyniki 2>/dev/null && break; sleep $((i*3)); git fetch -q --depth 30 o testy-wyniki && git rebase -q FETCH_HEAD > /dev/null 2>&1 || true; done
+          [ "$zle" -eq 0 ] && [ "$m" -eq "$N" ] && [ "$ok" -gt 0 ]
