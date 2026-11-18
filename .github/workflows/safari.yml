@@ -68,11 +68,15 @@ jobs:
         run: |
           git config --global user.name testy; git config --global user.email testy@users.noreply.github.com
           mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
-          if git fetch -q --depth 1 o testy-wyniki 2>/dev/null; then git checkout -q -b testy-wyniki FETCH_HEAD; else git checkout -q --orphan testy-wyniki; fi
-          D="safari/${{ github.run_id }}"; mkdir -p "$D"; cp -R "$HOME/wynik/." "$D/" 2>/dev/null
-          git add -A && git commit -q -m "safari ${{ github.run_id }}" || exit 0
-          for i in $(seq 1 8); do git push -q o HEAD:testy-wyniki 2>/dev/null && { echo "wysłane: $(ls "$D" | wc -l | tr -d ' ') plików"; exit 0; }; sleep $((i*3)); git fetch -q --depth 30 o testy-wyniki && git rebase -q FETCH_HEAD > /dev/null 2>&1 || true; done
-          echo "nie wysłano"; exit 1
+          mkdir -p "$HOME/wynik"
+          wyslij() {   # $1 gałąź, $2 katalog w gałęzi, $3 katalog z plikami, $4 opis; za każdym razem od świeżego czubka gałęzi (bez rebase), losowy odstęp
+          for i in $(seq 1 25); do
+          if git fetch -q --depth 1 o "$1" 2>/dev/null; then git checkout -q -f -B "w$i" FETCH_HEAD; else git switch -q -f --orphan "w$i"; fi
+          mkdir -p "$2" && cp -R "$3/." "$2/" && git add -A "$2" && git commit -q -m "$4" || { echo "nic do wysłania"; return 0; }
+          git push -q o "HEAD:$1" 2>/dev/null && { echo "wysłane (próba $i)"; return 0; }
+          sleep $(( 1 + RANDOM % (3 + 2 * i) ))
+          done; echo "nie wysłano"; return 1; }
+          wyslij testy-wyniki "safari/${{ github.run_id }}" "$HOME/wynik" "safari ${{ github.run_id }}" && echo "plików: $(ls "$HOME/wynik" | wc -l | tr -d ' ')"
       - name: Wynik
         if: steps.t.outputs.kod != '0'
         run: exit 1

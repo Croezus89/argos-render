@@ -61,6 +61,15 @@ jobs:
             studio/narzedzia
             archiwum/dostepnosc-narzedzia/skaner
           persist-credentials: false
+      - name: Dodatkowe katalogi potrzebne testom (z testy/actions-sciezki.txt gry)
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          bash prywatne/studio/narzedzia/actions-testy.sh --sciezki "$GRA" > ~/sciezki.txt; mapfile -t X < ~/sciezki.txt
+          [ ${#X[@]} -eq 0 ] && { echo "katalogów: 0"; exit 0; }
+          H="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$T" | base64 -w0)"
+          git -C prywatne -c "http.https://github.com/.extraheader=$H" sparse-checkout add "${X[@]}" > /dev/null 2>&1 || { echo "sparse-checkout add: błąd"; exit 1; }
+          echo "katalogów: ${#X[@]}"
       - uses: actions/setup-node@v5
         with:
           node-version: '22'
@@ -95,12 +104,15 @@ jobs:
         run: |
           git config --global user.name testy; git config --global user.email testy@users.noreply.github.com
           mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
-          if git fetch -q --depth 1 o testy-wyniki 2>/dev/null; then git checkout -q -b testy-wyniki FETCH_HEAD; else git checkout -q --orphan testy-wyniki; fi
-          D="wyniki/${{ github.run_id }}/$SHARD"; mkdir -p "$D"
-          find "$HOME/wynik" -maxdepth 1 -type f \( -name '*.log' -o -name '*.wynik' -o -name '*.txt' \) -exec cp {} "$D/" \; 2>/dev/null
-          git add -A && git commit -q -m "testy ${{ github.run_id }} maszyna $SHARD" || exit 0
-          for i in $(seq 1 10); do git push -q o HEAD:testy-wyniki 2>/dev/null && { echo "wysłane"; exit 0; }; sleep $(( i * 2 + RANDOM % 5 )); git fetch -q --depth 30 o testy-wyniki && git rebase -q FETCH_HEAD > /dev/null 2>&1 || true; done
-          echo "nie wysłano"; exit 1
+          mkdir ../wysylka; find "$HOME/wynik" -maxdepth 1 -type f \( -name '*.log' -o -name '*.wynik' -o -name '*.txt' \) -exec cp {} ../wysylka/ \; 2>/dev/null
+          wyslij() {   # $1 gałąź, $2 katalog w gałęzi, $3 katalog z plikami, $4 opis; za każdym razem od świeżego czubka gałęzi (bez rebase), losowy odstęp
+          for i in $(seq 1 25); do
+          if git fetch -q --depth 1 o "$1" 2>/dev/null; then git checkout -q -f -B "w$i" FETCH_HEAD; else git switch -q -f --orphan "w$i"; fi
+          mkdir -p "$2" && cp -R "$3/." "$2/" && git add -A "$2" && git commit -q -m "$4" || { echo "nic do wysłania"; return 0; }
+          git push -q o "HEAD:$1" 2>/dev/null && { echo "wysłane (próba $i)"; return 0; }
+          sleep $(( 1 + RANDOM % (3 + 2 * i) ))
+          done; echo "nie wysłano"; return 1; }
+          wyslij testy-wyniki "wyniki/${{ github.run_id }}/$SHARD" ../wysylka "testy ${{ github.run_id }} maszyna $SHARD"
       - name: Wynik maszyny
         if: steps.t.outputs.kod != '0'
         run: exit 1
@@ -121,5 +133,13 @@ jobs:
           cat "$D"/*/publiczne.txt 2>/dev/null | grep -E '^(OK|BŁĄD|POMINIĘTY|BUILD)' | sort -k2 > ../razem.txt
           ok=$(grep -c '^OK' ../razem.txt); zle=$(grep -cvE '^OK' ../razem.txt)
           { echo "Przebieg ${{ github.run_id }}: OK $ok/$((ok+zle)), maszyn z wynikiem $m/$N"; cat ../razem.txt; } | tee "$D/RAZEM.txt"
-          git add -A && git commit -q -m "testy ${{ github.run_id }} razem" && for i in $(seq 1 6); do git push -q o HEAD:testy-wyniki 2>/dev/null && break; sleep $((i*3)); git fetch -q --depth 30 o testy-wyniki && git rebase -q FETCH_HEAD > /dev/null 2>&1 || true; done
+          mkdir ../razem-w && cp "$D/RAZEM.txt" ../razem-w/
+          wyslij() {   # $1 gałąź, $2 katalog w gałęzi, $3 katalog z plikami, $4 opis; za każdym razem od świeżego czubka gałęzi (bez rebase), losowy odstęp
+          for i in $(seq 1 25); do
+          if git fetch -q --depth 1 o "$1" 2>/dev/null; then git checkout -q -f -B "w$i" FETCH_HEAD; else git switch -q -f --orphan "w$i"; fi
+          mkdir -p "$2" && cp -R "$3/." "$2/" && git add -A "$2" && git commit -q -m "$4" || { echo "nic do wysłania"; return 0; }
+          git push -q o "HEAD:$1" 2>/dev/null && { echo "wysłane (próba $i)"; return 0; }
+          sleep $(( 1 + RANDOM % (3 + 2 * i) ))
+          done; echo "nie wysłano"; return 1; }
+          wyslij testy-wyniki "$D" ../razem-w "testy ${{ github.run_id }} razem"
           [ "$zle" -eq 0 ] && [ "$m" -eq "$N" ] && [ "$ok" -gt 0 ]
