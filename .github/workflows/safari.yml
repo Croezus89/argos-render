@@ -1,0 +1,78 @@
+# Gra w prawdziwym Safari na Macu i w Safari symulatora iPhone'a (maszyna macOS). W tym repo nie ma naszych plików: paczka gry, scenariusz
+# i skrypt pobierane są w trakcie z repo prywatnego (sekret PRYWATNE_REPO_TOKEN), a zrzuty i błędy od razu wracają do repo prywatnego
+# (gałąź testy-wyniki, safari/<run_id>/). W logu tego przebiegu: tylko wersje i liczby. Uruchamianie tylko ręczne.
+name: safari
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'gałąź albo commit repo prywatnego'
+        required: true
+      plik:
+        description: 'ścieżka strony gry (index.html paczki) w repo prywatnym'
+        required: true
+      scenariusz:
+        description: 'ścieżka scenariusza JSON w repo prywatnym (puste = tylko wczytanie i zrzut)'
+        required: false
+        default: ''
+      iphone:
+        description: 'symulator iPhone (tak/nie)'
+        required: true
+        default: 'tak'
+      kontrola:
+        description: 'kontrola ujemna: celowy błąd strony, MUSI dać BŁĄD (tak/nie)'
+        required: true
+        default: 'nie'
+permissions:
+  contents: read
+env:
+  PLIK: ${{ inputs.plik }}
+  SCEN: ${{ inputs.scenariusz }}
+jobs:
+  safari:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - name: Wejścia
+        id: w
+        run: |
+          ok='^[A-Za-z0-9_./-]+$'
+          [[ "$PLIK" =~ $ok && "$PLIK" != *..* && "$PLIK" == *.html ]] || { echo "złe wejście plik"; exit 1; }
+          [[ -z "$SCEN" || ( "$SCEN" =~ $ok && "$SCEN" != *..* && "$SCEN" == *.json ) ]] || { echo "złe wejście scenariusz"; exit 1; }
+          { echo "wzorce<<KONIEC"; echo "/studio/narzedzia/actions-safari.py"; echo "/$(dirname "$PLIK")/"; [ -n "$SCEN" ] && echo "/$SCEN"; echo "KONIEC"; } >> $GITHUB_OUTPUT
+      - name: Paczka, scenariusz i skrypt z repo prywatnego
+        uses: actions/checkout@v5
+        with:
+          repository: Croezus89/Argos-Studios
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          path: prywatne
+          filter: blob:none
+          sparse-checkout-cone-mode: false
+          sparse-checkout: ${{ steps.w.outputs.wzorce }}
+          persist-credentials: false
+      - name: Safari i iPhone (w logu tylko wersje i liczby)
+        id: t
+        run: |
+          set +e; s=$(date +%s)
+          sudo safaridriver --enable > /dev/null 2>&1 || echo "safaridriver --enable: błąd"
+          A=(--plik "prywatne/$PLIK" --wyniki "$HOME/wynik"); [ -n "$SCEN" ] && A+=(--scenariusz "prywatne/$SCEN")
+          [ "${{ inputs.iphone }}" = "tak" ] || A+=(--bez-iphone); [ "${{ inputs.kontrola }}" = "tak" ] && A+=(--kontrola)
+          python3 prywatne/studio/narzedzia/actions-safari.py "${A[@]}" 2> "$HOME/stderr.txt"; k=$?
+          mkdir -p "$HOME/wynik"; mv "$HOME/stderr.txt" "$HOME/wynik/stderr.txt"
+          echo "kod=$k" >> $GITHUB_OUTPUT; echo "ref $(git -C prywatne rev-parse HEAD), kod $k, $(( $(date +%s) - s )) s" | tee "$HOME/wynik/info.txt" | cut -d' ' -f3-
+      - name: Zrzuty i błędy do repo prywatnego (gałąź testy-wyniki)
+        if: always()
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          git config --global user.name testy; git config --global user.email testy@users.noreply.github.com
+          mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
+          if git fetch -q --depth 1 o testy-wyniki 2>/dev/null; then git checkout -q -b testy-wyniki FETCH_HEAD; else git checkout -q --orphan testy-wyniki; fi
+          D="safari/${{ github.run_id }}"; mkdir -p "$D"; cp -R "$HOME/wynik/." "$D/" 2>/dev/null
+          git add -A && git commit -q -m "safari ${{ github.run_id }}" || exit 0
+          for i in $(seq 1 8); do git push -q o HEAD:testy-wyniki 2>/dev/null && { echo "wysłane: $(ls "$D" | wc -l | tr -d ' ') plików"; exit 0; }; sleep $((i*3)); git fetch -q --depth 30 o testy-wyniki && git rebase -q FETCH_HEAD > /dev/null 2>&1 || true; done
+          echo "nie wysłano"; exit 1
+      - name: Wynik
+        if: steps.t.outputs.kod != '0'
+        run: exit 1
