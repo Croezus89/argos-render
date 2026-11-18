@@ -23,11 +23,16 @@ on:
         description: 'kontrola ujemna: celowy błąd strony, MUSI dać BŁĄD (tak/nie)'
         required: true
         default: 'nie'
+      opcje:
+        description: 'dodatkowe opcje skryptu, np. "--bez-zasobu crazygames-sdk" (skrypt z tym napisem w adresie znika ze strony)'
+        required: false
+        default: ''
 permissions:
   contents: read
 env:
   PLIK: ${{ inputs.plik }}
   SCEN: ${{ inputs.scenariusz }}
+  OPCJE: ${{ inputs.opcje }}
 jobs:
   safari:
     runs-on: macos-26
@@ -39,6 +44,7 @@ jobs:
           ok='^[A-Za-z0-9_./-]+$'
           [[ "$PLIK" =~ $ok && "$PLIK" != *..* && "$PLIK" == *.html ]] || { echo "złe wejście plik"; exit 1; }
           [[ -z "$SCEN" || ( "$SCEN" =~ $ok && "$SCEN" != *..* && "$SCEN" == *.json ) ]] || { echo "złe wejście scenariusz"; exit 1; }
+          op='^( *--bez-zasobu [A-Za-z0-9._-]+)* *$'; [[ "$OPCJE" =~ $op ]] || { echo "złe wejście opcje"; exit 1; }
           { echo "wzorce<<KONIEC"; echo "/studio/narzedzia/actions-safari.py"; echo "/$(dirname "$PLIK")/"; [ -n "$SCEN" ] && echo "/$SCEN"; echo "KONIEC"; } >> $GITHUB_OUTPUT
       - name: Paczka, scenariusz i skrypt z repo prywatnego
         uses: actions/checkout@v5
@@ -57,7 +63,7 @@ jobs:
           set +e; s=$(date +%s)
           sudo safaridriver --enable > /dev/null 2>&1 || echo "safaridriver --enable: błąd"
           A=(--plik "prywatne/$PLIK" --wyniki "$HOME/wynik"); [ -n "$SCEN" ] && A+=(--scenariusz "prywatne/$SCEN")
-          [ "${{ inputs.iphone }}" = "tak" ] || A+=(--bez-iphone); [ "${{ inputs.kontrola }}" = "tak" ] && A+=(--kontrola)
+          [ "${{ inputs.iphone }}" = "tak" ] || A+=(--bez-iphone); [ "${{ inputs.kontrola }}" = "tak" ] && A+=(--kontrola); read -r -a OP <<< "$OPCJE"; A+=("${OP[@]}")
           python3 prywatne/studio/narzedzia/actions-safari.py "${A[@]}" 2> "$HOME/stderr.txt"; k=$?
           mkdir -p "$HOME/wynik"; mv "$HOME/stderr.txt" "$HOME/wynik/stderr.txt"
           echo "kod=$k" >> $GITHUB_OUTPUT; echo "ref $(git -C prywatne rev-parse HEAD), kod $k, $(( $(date +%s) - s )) s" | tee "$HOME/wynik/info.txt" | cut -d' ' -f3-
