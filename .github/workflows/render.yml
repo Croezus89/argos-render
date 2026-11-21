@@ -103,6 +103,34 @@ jobs:
           key: blender-5.2.4-linux-x64
       - if: steps.cache.outputs.cache-hit != 'true'
         run: mkdir -p ~/blender && curl -sSL https://download.blender.org/release/Blender5.2/blender-5.2.4-linux-x64.tar.xz | tar -xJ -C ~/blender
+      - name: Tekstury Poly Haven CC0 (pamięć podręczna)
+        id: tcache
+        uses: actions/cache@v4
+        with:
+          path: ~/tekstury
+          key: tekstury-polyhaven-1k-v1-${{ hashFiles('prywatne/**/zestaw/drzewo.py') }}
+          restore-keys: tekstury-polyhaven-1k-v1-
+      - name: Tekstury (kora drzew z drzewo.py + opcjonalne „tekstury” z zadania)
+        run: |
+          # Kora: każde tex='…' z generatora drzew (bez tego drzewo.py po cichu renderuje korę bez tekstury, inaczej niż lokalnie).
+          # Zadanie może dodać {"tekstury": ["nazwa", …]} → ~/tekstury/<nazwa>_diff_1k.jpg i _nor_gl_1k.jpg (jak TEKSTURY w rosliny.py).
+          mkdir -p ~/tekstury/kora
+          pobierz() {   # $1 nazwa Poly Haven, $2 katalog docelowy
+            for m in diff nor_gl; do f="$2/$1_${m}_1k.jpg"; [ -s "$f" ] && continue
+              curl -sfSL --retry 3 -o "$f" "https://dl.polyhaven.org/file/ph-assets/Textures/jpg/1k/$1/$1_${m}_1k.jpg" || { echo "BŁĄD tekstury $1 ($m)"; exit 1; }
+            done; }
+          K=$( (cat prywatne/gry/*/*/blender/zestaw/drzewo.py 2>/dev/null || true) | (grep -oE "tex='[a-z0-9_]+'" || true) | sed "s/tex='//;s/'//" | sort -u)
+          for n in $K; do pobierz "$n" ~/tekstury/kora; done
+          D=$(python3 -c "
+          import json, os, re, sys
+          for n in json.load(open(os.path.expanduser('~/zadanie.json'))).get('tekstury', []):
+              if not re.match(r'^[a-z0-9_]+$', n): sys.exit('zła nazwa tekstury')
+              print(n)")
+          for n in $D; do pobierz "$n" ~/tekstury; done
+          # DRZEWO_TEKSTURY zawsze (czyta go tylko drzewo.py); TEKSTURY tylko na prośbę zadania, żeby nie zmienić innych renderów
+          echo "DRZEWO_TEKSTURY=$HOME/tekstury" >> $GITHUB_ENV
+          [ -n "$D" ] && echo "TEKSTURY=$HOME/tekstury" >> $GITHUB_ENV || true
+          echo "tekstury: kora $(echo $K | wc -w), z zadania $(echo $D | wc -w)"
       - name: Render (bez wypisywania treści)
         run: |
           sudo apt-get install -y -q libxi6 libxkbcommon0 libxxf86vm1 libgl1 libegl1 >/dev/null 2>&1 || true
