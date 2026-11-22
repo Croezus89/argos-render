@@ -147,7 +147,16 @@ jobs:
             skr=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])[0])" "$l"); out=$(python3 -c "import json,sys;print(json.loads(sys.argv[1])[1])" "$l")
             mapfile -t reszta < <(python3 -c "import json,sys;[print(x) for x in json.loads(sys.argv[1])[2:]]" "$l")
             mkdir -p "$out"
-            if ~/blender/blender-5.2.4-linux-x64/blender -b -t 0 -P "$skr" -- --out "$out" "${reszta[@]}" > /dev/null 2>&1; then ok=$((ok+1)); else zle=$((zle+1)); fi
+            kod=0   # run: to bash -e -o pipefail, więc kod przez ||, a grep bez dopasowania z || true
+            # 22.11: Blender kończy kodem 0 także po błędzie Pythona, więc „udany” = jest PNG; inaczej BLAD.txt (koniec logu) i wariant.txt,
+            # żeby strojenie.py od razu zakończyło rundę z przyczyną zamiast czekać do czekaj_min
+            ~/blender/blender-5.2.4-linux-x64/blender -b -t 0 -P "$skr" -- --out "$out" "${reszta[@]}" > "$out.log" 2>&1 || kod=$?
+            if [ "$kod" = 0 ] && find "$out" -name '*.png' -print -quit | grep -q .; then ok=$((ok+1)); else
+              zle=$((zle+1)); { echo "kod $kod, brak PNG"; { grep -E 'Error|Traceback|line [0-9]+' "$out.log" || true; } | tail -n 15; echo ---; tail -n 25 "$out.log"; } > "$out/BLAD.txt"
+              if [ ! -f "$out/wariant.txt" ]; then python3 -c "import sys;a=sys.argv[1:];print(a[a.index('--wariant')+1] if '--wariant' in a else '{}')" "${reszta[@]}" > "$out/wariant.txt"; fi
+              echo "BŁĄD wariantu $out:"; head -n 8 "$out/BLAD.txt"
+            fi
+            rm -f "$out.log"
           done < ../polecenia.txt
           echo "warianty: ok $ok, błąd $zle; rdzeni: $(nproc)"
       - name: Obrazki do repo prywatnego (gałąź render-wyniki)
