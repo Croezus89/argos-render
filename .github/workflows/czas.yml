@@ -1,0 +1,131 @@
+# Testy CZASU (płynność, pierwsza minuta, WebKit) w JEDNYM zadaniu na jednej maszynie: baza i nowa wersja naprzemiennie, N powtórzeń, porównanie z bazą w tym samym zadaniu
+# (maszyny Actions są różne i „głośne”, więc liczą się tylko pomiary z tej samej maszyny i tego samego zadania). Bez naszych plików w tym repo: kod z repo prywatnego
+# (sekret PRYWATNE_REPO_TOKEN), wyniki do gałęzi testy-wyniki (czas/<run_id>/). W publicznym logu tylko liczby (p95, mediany, sekundy). Uruchamianie tylko ręczne.
+name: czas
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'gałąź albo commit repo prywatnego: NOWA wersja'
+        required: true
+      ref_baza:
+        description: 'gałąź albo commit bazy do porównania (puste = bez bazy, tylko nowa wersja)'
+        required: false
+        default: ''
+      gra:
+        description: 'katalog gry (z testy/komplet.sh)'
+        required: true
+      testy:
+        description: 'nazwy testów czasu po przecinku z komplet.sh gry'
+        required: true
+        default: 'plynnosc,pierwsza-minuta'
+      powtorzen:
+        description: 'liczba powtórzeń każdego testu w każdej wersji (1–6)'
+        required: true
+        default: '3'
+permissions:
+  contents: read
+env:
+  GRA: ${{ inputs.gra }}
+  WYB: ${{ inputs.testy }}
+  REP: ${{ inputs.powtorzen }}
+  BAZA: ${{ inputs.ref_baza }}
+jobs:
+  czas:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Wejście
+        run: |
+          [[ "$GRA" =~ ^[A-Za-z0-9_./-]+$ && "$GRA" != *..* && "$WYB" =~ ^[A-Za-z0-9_,-]+$ ]] || { echo "złe wejście gra/testy"; exit 1; }
+          [[ "$REP" =~ ^[1-6]$ ]] || { echo "powtórzeń: 1–6"; exit 1; }
+      - name: Nowa wersja z repo prywatnego
+        uses: actions/checkout@v5
+        with:
+          repository: Croezus89/Argos-Studios
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          path: nowa
+          filter: blob:none
+          sparse-checkout: |
+            ${{ inputs.gra }}
+            studio/wspolne
+            studio/narzedzia
+            archiwum/dostepnosc-narzedzia/skaner
+          persist-credentials: false
+      - name: Baza z repo prywatnego
+        if: inputs.ref_baza != ''
+        uses: actions/checkout@v5
+        with:
+          repository: Croezus89/Argos-Studios
+          ref: ${{ inputs.ref_baza }}
+          token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          path: baza
+          filter: blob:none
+          sparse-checkout: |
+            ${{ inputs.gra }}
+            studio/wspolne
+            studio/narzedzia
+            archiwum/dostepnosc-narzedzia/skaner
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Przeglądarki (jak w testy.yml; WebKit tylko gdy test go wymaga)
+        run: |
+          s=$(date +%s); P=$HOME/pw; mkdir -p $P; echo "PLAYWRIGHT_BROWSERS_PATH=$P" >> $GITHUB_ENV; export PLAYWRIGHT_BROWSERS_PATH=$P
+          cd nowa/archiwum/dostepnosc-narzedzia/skaner && npm ci --no-audit --no-fund --silent > /dev/null 2>&1 || { echo "npm ci: błąd"; exit 1; }
+          CLI=node_modules/playwright-core/cli.js; B="chromium"; [[ "$WYB" == *webkit* ]] && B="chromium webkit"
+          node $CLI install $B > /dev/null 2>&1 || { echo "instalacja przeglądarek: błąd"; exit 1; }
+          sudo env "PATH=$PATH" "PLAYWRIGHT_BROWSERS_PATH=$P" node $CLI install-deps $B > /dev/null 2>&1 || { echo "zależności przeglądarek: błąd"; exit 1; }
+          ln -sfn "$(ls -d $P/chromium-*/chrome-linux64/chrome | head -1)" $P/chromium && sudo ln -sfn $P /opt/pw-browsers
+          python3 -m pip install --user --break-system-packages -q numpy pillow > /dev/null 2>&1 || true
+          cd "$GITHUB_WORKSPACE"; [ -d baza ] && ln -sfn "$GITHUB_WORKSPACE/nowa/archiwum/dostepnosc-narzedzia/skaner/node_modules" baza/archiwum/dostepnosc-narzedzia/skaner/node_modules
+          echo "przeglądarki: $B, $(( $(date +%s) - s )) s; $(/opt/pw-browsers/chromium --version); rdzeni $(nproc), $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+      - name: Pomiary naprzemiennie (baza, nowa, nowa, baza, ...)
+        run: |
+          set +e; mkdir -p "$HOME/wynik"; : > "$HOME/wynik/kolejnosc.txt"
+          for i in $(seq 1 "$REP"); do
+            if [ -d baza ]; then if [ $((i % 2)) -eq 1 ]; then K="baza nowa"; else K="nowa baza"; fi; else K="nowa"; fi
+            for w in $K; do
+              echo "$w $i" >> "$HOME/wynik/kolejnosc.txt"
+              ( cd "$GITHUB_WORKSPACE/$w" && bash studio/narzedzia/actions-testy.sh "$GRA" "$WYB" 0 1 "$HOME/wynik/$w-$i" > /dev/null 2>&1 )
+              echo "powtórzenie $i, $w: $(tr '\n' ' ' < "$HOME/wynik/$w-$i/publiczne.txt" | cut -c1-300)"
+            done
+          done
+          true
+      - name: Zestawienie (w logu tylko liczby)
+        run: |
+          python3 - <<'PY'
+          import re,glob,os,statistics as st,json
+          W=os.path.expanduser('~/wynik'); out=[]; dane={}
+          for d in sorted(glob.glob(W+'/*-[0-9]')):
+              w,i=os.path.basename(d).rsplit('-',1)
+              for f in sorted(glob.glob(d+'/*.log')):
+                  t=os.path.basename(f)[:-4]; txt=open(f,errors='replace').read()
+                  for k,rx in (('p95',r'p95 ([0-9.]+) ms'),('mediana',r'mediana ([0-9.]+) ms'),('po s',r'po ([0-9.]+) s')):
+                      v=[float(x) for x in re.findall(rx,txt)]
+                      if v: dane.setdefault((t,k,w),[]).append((int(i),v))
+          for (t,k,w),L in sorted(dane.items()):
+              wart=[sum(v)/len(v) for _,v in L]
+              out.append(f'{t} {k} {w}: n={len(wart)} wartości(średnia z punktów) '+' '.join(f'{x:.2f}' for x in wart)+f' | min {min(wart):.2f} maks {max(wart):.2f} rozrzut {max(wart)-min(wart):.2f}')
+          for (t,k,w),L in sorted(dane.items()):
+              if w=='baza' and (t,k,'nowa') in dane:
+                  a=[sum(v)/len(v) for _,v in L]; b=[sum(v)/len(v) for _,v in dane[(t,k,'nowa')]]
+                  out.append(f'{t} {k}: nowa − baza (średnie) = {st.mean(b)-st.mean(a):+.2f} (rozrzut bazy {max(a)-min(a):.2f}, nowej {max(b)-min(b):.2f})')
+          open(W+'/ZESTAWIENIE.txt','w').write('\n'.join(out)+'\n'); print('\n'.join(out) or 'brak liczb w logach')
+          PY
+      - name: Wyniki do repo prywatnego (gałąź testy-wyniki)
+        if: always()
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          git config --global user.name czas; git config --global user.email czas@users.noreply.github.com
+          mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
+          mkdir ../wysylka; cp "$HOME/wynik/"*.txt ../wysylka/ 2>/dev/null; for d in "$HOME"/wynik/*-[0-9]; do [ -d "$d" ] && { mkdir -p "../wysylka/$(basename $d)"; cp "$d"/*.log "$d"/*.txt "../wysylka/$(basename $d)/" 2>/dev/null; }; done
+          for i in $(seq 1 25); do
+            if git fetch -q --depth 1 o testy-wyniki 2>/dev/null; then git checkout -q -f -B "w$i" FETCH_HEAD; else git switch -q -f --orphan "w$i"; fi
+            mkdir -p "czas/${{ github.run_id }}" && cp -R ../wysylka/. "czas/${{ github.run_id }}/" && git add -A czas && git commit -q -m "czas ${{ github.run_id }}" || { echo "nic do wysłania"; exit 0; }
+            git push -q o "HEAD:testy-wyniki" 2>/dev/null && { echo "wysłane (próba $i)"; exit 0; }
+            sleep $(( 1 + RANDOM % (3 + 2 * i) ))
+          done; echo "nie wysłano"; exit 1
