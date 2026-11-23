@@ -40,6 +40,11 @@ jobs:
     needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # 23.11: obraz Playwright ma przeglądarki i ich zależności (start ok. 40 s); instalacja apt na gołej maszynie trwała 103–992 s.
+    # Wersja obrazu = playwright-core z package-lock skanera; przy innej wersji krok przeglądarek instaluje je jak dawniej.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      options: --ipc=host
     strategy:
       fail-fast: false
       matrix:
@@ -79,16 +84,18 @@ jobs:
           bash prywatne/studio/narzedzia/actions-testy.sh --lista "$GRA" "$WYB" "$SHARD" "$N" > ~/lista.txt
           echo "testów: $(wc -l < ~/lista.txt)"
           grep -q webkit ~/lista.txt && echo "webkit=1" >> $GITHUB_OUTPUT || true
-      - name: Przeglądarki (playwright-core z package-lock, Chromium, WebKit gdy potrzebny)
+      - name: Przeglądarki (obraz Playwright; instalacja tylko przy innej wersji playwright-core)
         run: |
-          s=$(date +%s); P=$HOME/pw; mkdir -p $P; echo "PLAYWRIGHT_BROWSERS_PATH=$P" >> $GITHUB_ENV; export PLAYWRIGHT_BROWSERS_PATH=$P
+          s=$(date +%s); P=/ms-playwright; echo "PLAYWRIGHT_BROWSERS_PATH=$P" >> $GITHUB_ENV; export PLAYWRIGHT_BROWSERS_PATH=$P
           cd prywatne/archiwum/dostepnosc-narzedzia/skaner && npm ci --no-audit --no-fund --silent > /dev/null 2>&1 || { echo "npm ci: błąd"; exit 1; }
           CLI=node_modules/playwright-core/cli.js; B="chromium"; [ "${{ steps.l.outputs.webkit }}" = 1 ] && B="chromium webkit"
-          node $CLI install $B > /dev/null 2>&1 || { echo "instalacja przeglądarek: błąd"; exit 1; }
-          sudo env "PATH=$PATH" "PLAYWRIGHT_BROWSERS_PATH=$P" node $CLI install-deps $B > /dev/null 2>&1 || { echo "zależności przeglądarek: błąd"; exit 1; }
-          ln -sfn "$(ls -d $P/chromium-*/chrome-linux64/chrome | head -1)" $P/chromium && sudo ln -sfn $P /opt/pw-browsers
-          python3 -m pip install --user --break-system-packages -q numpy pillow > /dev/null 2>&1 || echo "numpy/pillow: błąd instalacji"
-          echo "playwright-core $(node -p "require('./node_modules/playwright-core/package.json').version"), $(/opt/pw-browsers/chromium --version), przeglądarki: $B, $(( $(date +%s) - s )) s"
+          W=$(node -p "require('./node_modules/playwright-core/package.json').version"); Z="z obrazu"
+          if [ "$W" != 1.63.0 ]; then Z="zainstalowane (playwright-core $W ≠ obraz 1.63.0: podnieś wersję obrazu w testy.yml)"
+            node $CLI install $B > /dev/null 2>&1 || { echo "instalacja przeglądarek: błąd"; exit 1; }
+            node $CLI install-deps $B > /dev/null 2>&1 || { echo "zależności przeglądarek: błąd"; exit 1; }; fi
+          ln -sfn "$(ls -d $P/chromium-*/chrome-linux64/chrome | head -1)" $P/chromium && mkdir -p /opt && ln -sfn $P /opt/pw-browsers
+          (apt-get update -qq && apt-get install -y -qq python3-numpy python3-pil) > /dev/null 2>&1 || echo "numpy/pillow: błąd instalacji"
+          echo "playwright-core $W, $(/opt/pw-browsers/chromium --version), przeglądarki $Z: $B, $(( $(date +%s) - s )) s"
       - name: Testy (w logu tylko nazwy i OK/BŁĄD)
         id: t
         run: |
