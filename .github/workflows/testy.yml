@@ -45,6 +45,10 @@ jobs:
     container:
       image: mcr.microsoft.com/playwright:v1.63.0-noble
       options: --ipc=host
+    # w kontenerze domyślna powłoka kroków to sh (dash): bez mapfile i [[ ]] (23.11, pierwszy przebieg padł po 57 s)
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
