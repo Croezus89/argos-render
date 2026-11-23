@@ -1,0 +1,100 @@
+# Zrzuty i klatki dla krytyka i bramek (Playwright, zatrzymany zegar) na maszynie Actions zamiast na naszych 4 rdzeniach. W tym repo nie ma naszych plików:
+# kod gry i skrypt zrzutów pobierane są z repo prywatnego (sekret PRYWATNE_REPO_TOKEN), a obrazy (+ arkusz.png) wracają do repo prywatnego
+# (gałąź testy-wyniki, zrzuty/<run_id>/). W publicznym logu tylko liczba plików i czas. Uruchamianie tylko ręczne.
+name: zrzuty
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'gałąź albo commit repo prywatnego'
+        required: true
+      gra:
+        description: 'katalog gry (pobierany razem z studio/wspolne, studio/narzedzia i skanerem)'
+        required: true
+      polecenie:
+        description: 'polecenie w katalogu repo; {WYJ} = katalog wyników, np. node studio/wspolne/testy/ekrany.cjs gry/shred --zrzuty {WYJ}'
+        required: true
+      dodatkowe:
+        description: 'dodatkowe katalogi do pobrania, po przecinku (np. studio/kino, gry/gra8/raport)'
+        required: false
+        default: ''
+      arkusz:
+        description: 'arkusz.png z wszystkich zrzutów (tak/nie) i liczba kolumn'
+        required: false
+        default: 'tak'
+permissions:
+  contents: read
+env:
+  GRA: ${{ inputs.gra }}
+  POL: ${{ inputs.polecenie }}
+  DOD: ${{ inputs.dodatkowe }}
+  ARK: ${{ inputs.arkusz }}
+jobs:
+  zrzuty:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Wejście
+        id: w
+        run: |
+          [[ "$GRA" =~ ^[A-Za-z0-9_./-]+$ && "$GRA" != *..* ]] || { echo "zła gra"; exit 1; }
+          [[ "$POL" =~ ^(node|python3|bash)\ [A-Za-z0-9_./\ \{\}=:,@-]+$ && "$POL" != *..* ]] || { echo "złe polecenie (node|python3|bash <plik> <argumenty>; bez ; | & \$ \` ..)"; exit 1; }
+          [[ "$DOD" =~ ^[A-Za-z0-9_./,-]*$ && "$DOD" != *..* ]] || { echo "złe dodatkowe"; exit 1; }
+          printf '%s\n' "${DOD//,/$'\n'}" | grep -v '^$' > $RUNNER_TEMP/dod.txt || true
+          { echo 'sciezki<<EOF'; cat $RUNNER_TEMP/dod.txt; echo EOF; } >> $GITHUB_OUTPUT
+      - name: Kod z repo prywatnego
+        uses: actions/checkout@v5
+        with:
+          repository: Croezus89/Argos-Studios
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+          path: prywatne
+          filter: blob:none
+          sparse-checkout: |
+            ${{ inputs.gra }}
+            studio/wspolne
+            studio/narzedzia
+            archiwum/dostepnosc-narzedzia/skaner
+            ${{ steps.w.outputs.sciezki }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Przeglądarka (Chromium z package-lock)
+        run: |
+          P=$HOME/pw; mkdir -p $P; echo "PLAYWRIGHT_BROWSERS_PATH=$P" >> $GITHUB_ENV; export PLAYWRIGHT_BROWSERS_PATH=$P
+          cd prywatne/archiwum/dostepnosc-narzedzia/skaner && npm ci --no-audit --no-fund --silent > /dev/null 2>&1 || { echo "npm ci: błąd"; exit 1; }
+          CLI=node_modules/playwright-core/cli.js
+          node $CLI install chromium > /dev/null 2>&1 || { echo "instalacja przeglądarki: błąd"; exit 1; }
+          sudo env "PATH=$PATH" "PLAYWRIGHT_BROWSERS_PATH=$P" node $CLI install-deps chromium > /dev/null 2>&1 || { echo "zależności: błąd"; exit 1; }
+          ln -sfn "$(ls -d $P/chromium-*/chrome-linux64/chrome | head -1)" $P/chromium && sudo ln -sfn $P /opt/pw-browsers
+          python3 -m pip install --user --break-system-packages -q numpy pillow > /dev/null 2>&1 || true
+      - name: Zrzuty
+        id: z
+        run: |
+          set +e; s=$(date +%s); W="$HOME/zrzuty"; mkdir -p "$W"
+          cd prywatne && bash -c "${POL//\{WYJ\}/$W}" > "$HOME/zrzuty-log.txt" 2>&1; k=$?
+          echo "kod=$k" >> $GITHUB_OUTPUT
+          echo "polecenie zakończone kodem $k po $(( $(date +%s) - s )) s; plików: $(find "$W" -type f | wc -l) (png: $(find "$W" -name '*.png' | wc -l))"
+          cp "$HOME/zrzuty-log.txt" "$W/_log.txt"
+      - name: Arkusz
+        if: always() && env.ARK != 'nie'
+        run: |
+          W="$HOME/zrzuty"; K=$(echo "$ARK" | grep -oE '[0-9]+' | head -1); K=${K:-4}
+          python3 prywatne/studio/narzedzia/arkusz-zdjec.py "$W" "$W/arkusz.png" --kolumny "$K" --pomin arkusz.png || echo "arkusz: brak zrzutów"
+      - name: Wyniki do repo prywatnego (gałąź testy-wyniki)
+        if: always()
+        env:
+          T: ${{ secrets.PRYWATNE_REPO_TOKEN }}
+        run: |
+          git config --global user.name zrzuty; git config --global user.email zrzuty@users.noreply.github.com
+          mkdir w && cd w && git init -q && git remote add o "https://x-access-token:${T}@github.com/Croezus89/Argos-Studios.git"
+          for i in $(seq 1 25); do
+            if git fetch -q --depth 1 o testy-wyniki 2>/dev/null; then git checkout -q -f -B "w$i" FETCH_HEAD; else git switch -q -f --orphan "w$i"; fi
+            mkdir -p "zrzuty/${{ github.run_id }}" && cp -R "$HOME/zrzuty/." "zrzuty/${{ github.run_id }}/" && git add -A zrzuty && git commit -q -m "zrzuty ${{ github.run_id }}" || { echo "nic do wysłania"; exit 0; }
+            git push -q o "HEAD:testy-wyniki" 2>/dev/null && { echo "wysłane (próba $i)"; exit 0; }
+            sleep $(( 1 + RANDOM % (3 + 2 * i) ))
+          done; echo "nie wysłano"; exit 1
+      - name: Wynik
+        if: steps.z.outputs.kod != '0'
+        run: exit 1
