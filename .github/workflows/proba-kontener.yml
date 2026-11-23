@@ -1,0 +1,24 @@
+# Próba 23.11: czy obraz Playwright (przeglądarki i zależności w środku) zastąpi instalację w testy.yml. Do usunięcia po próbie.
+name: proba-kontener
+on:
+  push:
+    branches: [claude/blissful-gates-knrnra]
+    paths: ['.github/workflows/proba-kontener.yml']
+permissions:
+  contents: read
+jobs:
+  proba:
+    runs-on: ubuntu-24.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble
+      options: --ipc=host
+    steps:
+      - run: |
+          set +e
+          echo "uzytkownik $(id -u), node $(node -v), git: $(command -v git), python3: $(command -v python3), pip: $(command -v pip3), sudo: $(command -v sudo)"
+          ls /ms-playwright
+          python3 -c 'import numpy, PIL; print("numpy+PIL w obrazie")' 2>&1 | tail -1
+          s=$(date +%s); (apt-get update -qq && apt-get install -y -qq python3-numpy python3-pil) > /dev/null 2>&1; echo "apt numpy/pil: kod $?, $(( $(date +%s) - s )) s"
+          python3 -c 'import numpy, PIL; print("numpy+PIL po apt OK")'
+          ls -d /ms-playwright/chromium-*/chrome-linux64/chrome && /ms-playwright/chromium-*/chrome-linux64/chrome --version
+          nproc
