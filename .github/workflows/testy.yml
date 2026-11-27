@@ -98,7 +98,7 @@ jobs:
             node $CLI install $B > /dev/null 2>&1 || { echo "instalacja przeglądarek: błąd"; exit 1; }
             node $CLI install-deps $B > /dev/null 2>&1 || { echo "zależności przeglądarek: błąd"; exit 1; }; fi
           ln -sfn "$(ls -d $P/chromium-*/chrome-linux64/chrome | head -1)" $P/chromium && mkdir -p /opt && ln -sfn $P /opt/pw-browsers
-          (apt-get update -qq && apt-get install -y -qq python3-numpy python3-pil) > /dev/null 2>&1 || echo "numpy/pillow: błąd instalacji"
+          (apt-get update -qq && apt-get install -y -qq python3-numpy python3-pil ffmpeg) > /dev/null 2>&1 || echo "numpy/pillow/ffmpeg: błąd instalacji"
           echo "playwright-core $W, $(/opt/pw-browsers/chromium --version), przeglądarki $Z: $B, $(( $(date +%s) - s )) s"
       - name: Testy (w logu tylko nazwy i OK/BŁĄD)
         id: t
